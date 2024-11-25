@@ -2,8 +2,11 @@ import sys
 import requests
 from bs4 import BeautifulSoup
 import re
+import pandas as pd
+import xlsxwriter
 from datetime import datetime
-from PySide6.QtWidgets import QApplication, QWidget
+from collections import defaultdict
+from PySide6.QtWidgets import QApplication, QWidget, QFileDialog
 from lostark_class_data_ui import Ui_Form
 
 class MainWindow(QWidget, Ui_Form):
@@ -18,118 +21,144 @@ class MainWindow(QWidget, Ui_Form):
         self.quit_btn.clicked.connect(self.quit)
 
     def start(self):
-        # 사용자 입력 처리
-        self.textBrowser.clear()
-        job_name = self.keyword.text()  # 직업 이름을 입력받는 텍스트 필드
-        input_date = self.date.text()  # 날짜를 yyyy-MM-dd 형식으로 입력받는 필드
-        input_date = datetime.strptime(input_date, "%Y-%m-%d").strftime("%m-%d")  # 날짜 형식을 MM-dd로 변환
-
-        # 게시판 URL 가져오기
-        job_board_url = get_job_board_url(job_name)
+        job_name = self.keyword.text()
+        input_date = self.date.text()  # yyyy-MM-dd 형식
+        job_board_url = self.get_job_board_url(job_name)
 
         if job_board_url:
-            self.textBrowser.append(f"현재 검색한 직업은 {job_name}입니다")
-            emoji_title_count, total_title_count = self.count_emoji_titles(job_board_url, input_date)
-            self.textBrowser.append(f"전체 글 제목의 개수: {total_title_count}")
-            self.textBrowser.append(f"이모티콘이 포함된 글 제목의 개수: {emoji_title_count}")
+            self.textBrowser.append(f"현재 검색한 직업: {job_name}")
+            emoji_count, total_count, self.emoji_date_stats = self.count_emoji_titles(job_board_url, input_date)
+            self.textBrowser.append(f"전체 글 수: {total_count}")
+            self.textBrowser.append(f"이모티콘 포함 글 수: {emoji_count}")
         else:
             self.textBrowser.append("해당 직업의 게시판을 찾을 수 없습니다.")
 
     def reset(self):
         self.keyword.clear()
+        self.date.clear()
         self.textBrowser.clear()
 
     def save(self):
-        # 현재 출력된 내용을 텍스트 파일로 저장
-        with open("result.txt", "w", encoding="utf-8") as file:
-            file.write(self.textBrowser.toPlainText())
-        self.textBrowser.append("결과가 result.txt 파일에 저장되었습니다.")
+        job_name = self.keyword.text().strip()  
+        self.save_statistics_as_excel(job_name)
+        
+        # 기본 파일명 생성
+        # default_filename = f"{job_name}_{input_date}_emoji_stats.txt"
+        # save_path, _ = QFileDialog.getSaveFileName(self, "Save File", default_filename, "Text Files (*.txt)")
+        
+        # if save_path:
+        #     with open(save_path, "w") as file:
+        #         for date, count in sorted(self.emoji_date_stats.items()):
+        #             file.write(f"{date}: {count} 개의 이모티콘 포함 글\n")
+        #     self.textBrowser.append(f"파일이 {save_path}에 저장되었습니다.")
 
     def quit(self):
-        QApplication.instance().quit()
+        QApplication.quit()
 
-    def count_emoji_titles(self, job_board_url, input_date):
-        emoji_pattern = re.compile(r'[●▅]')  # 이모티콘 패턴 정의
-        emoji_count = 0
-        total_count = 0  # 전체 글 개수 초기화
-        
-        input_date_obj = datetime.strptime(input_date, "%m-%d")  # input_date를 datetime 객체로 변환
-        page = 1
-        while True:
-            self.textBrowser.append(f"{page} 페이지 크롤링 중...")
-            # 각 페이지의 URL 구성
-            page_url = f"{job_board_url}?p={page}"
-            response = requests.get(page_url)
-            response.raise_for_status()  # 요청 에러 확인
-            
-            # HTML 파싱
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # 게시글 정보가 포함된 <tr> 요소 추출
-            rows = soup.find_all("tr", class_="")
-            
-            # 각 <tr>에서 게시글 정보 확인
-            for row in rows:
-                date_tag = row.find("td", class_="date")
-                if date_tag:
-                    date_str = date_tag.text.strip()  # 날짜 문자열 추출
-                    try:
-                        if '-' in date_str:  # 월-일 형식일 경우
-                            date_obj = datetime.strptime(date_str, "%m-%d")
-                        else:  # 시간만 있는 경우 오늘 날짜로 간주
-                            date_obj = datetime.strptime(date_str, "%H:%M")
-                            date_obj = date_obj.replace(year=datetime.today().year, month=datetime.today().month, day=datetime.today().day)
+    def get_job_board_url(self, job_name):
+        main_url = "https://lostark.inven.co.kr/"
+        target_base_url = "https://www.inven.co.kr"
 
-                        # input_date보다 빠른 날짜면 종료
-                        if date_obj < input_date_obj:
-                            return emoji_count, total_count  # while 루프 종료
-                    
-                    except ValueError:
-                        continue  # 날짜 파싱 오류 시 건너뛰기
+        response = requests.get(main_url)
+        response.raise_for_status()
 
-                # 글 제목 요소 추출
-                title_tag = row.find("a", class_="subject-link")
-                if title_tag:
-                    total_count += 1
-                    # 글 제목에서 이모티콘 포함 여부 확인
-                    if emoji_pattern.search(title_tag.text):  
-                        self.textBrowser.append(f"이모티콘 포함 글 제목: {title_tag.text.strip()}")
-                        emoji_count += 1
+        soup = BeautifulSoup(response.text, "html.parser")
+        job_link = None
+        links = soup.find_all("a", href=True)
+        for link in links:
+            if job_name in link.text:
+                job_link = link.get("href")
+                break
 
-            page += 1  # 다음 페이지로 이동
-        return emoji_count, total_count
-
-# 직업 게시판 URL을 찾는 함수
-def get_job_board_url(job_name):
-    main_url = "https://lostark.inven.co.kr/"
-    target_base_url = "https://www.inven.co.kr"  # 링크의 베이스 URL
-    
-    # 메인 페이지에서 게시판 목록 페이지로 이동
-    response = requests.get(main_url)
-    response.raise_for_status()  # 요청 에러 확인
-    
-    # HTML 파싱
-    soup = BeautifulSoup(response.text, "html.parser")
-    
-    # 입력받은 직업 이름으로 링크 검색
-    job_link = None
-    links = soup.find_all("a", href=True)
-    for link in links:
-        if job_name in link.text:
-            job_link = link.get("href")
-            break
-    
-    if job_link:
-        # 링크가 절대 경로인지 확인하고, 상대 경로인 경우에만 base URL 추가
-        if not job_link.startswith("http"):
-            full_url = target_base_url + job_link
-        else:
-            full_url = job_link
-        return full_url
-    else:
+        if job_link:
+            if not job_link.startswith("http"):
+                return target_base_url + job_link
+            return job_link
         return None
 
-# PySide6 애플리케이션 실행
+    def count_emoji_titles(self, job_board_url, input_date):
+        emoji_pattern = re.compile(r'[●▅]')  
+        emoji_count = 0
+        total_count = 0
+        self.emoji_date_stats = defaultdict(int)  
+
+        input_date_obj = datetime.strptime(input_date, "%Y-%m-%d")
+        page = 1
+        while True:
+            self.textBrowser.append(f"{page} 페이지 크롤링 중")
+            page_url = f"{job_board_url}?p={page}"
+            response = requests.get(page_url)
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            # board-list 클래스를 가진 div 내부의 table에서 tr 요소 추출
+            table = soup.select_one(".board-list > table")
+            if not table:
+                self.textBrowser.append("게시판 데이터를 찾을 수 없습니다.")
+                break
+            rows = table.find_all("tr")
+
+            for row in rows:
+                # 공지사항인 경우 건너뛰기
+                notice_tag = row.find("td", class_="num")
+                if notice_tag and "공지" in notice_tag.text:
+                    continue
+
+                date_tag = row.find("td", class_="date")
+                if date_tag:
+                    date_str = date_tag.text.strip()
+                    try:
+                        if ":" in date_str:
+                            date_obj = datetime.today()
+                        else:
+                            date_obj = datetime.strptime(date_str, "%m-%d")
+                            date_obj = date_obj.replace(year=datetime.today().year)
+
+                        if date_obj < input_date_obj:
+                            return emoji_count, total_count, self.emoji_date_stats
+
+                        title_tag = row.find("a", class_="subject-link")
+                        if title_tag:
+                            total_count += 1
+                            if emoji_pattern.search(title_tag.text):
+                                self.emoji_date_stats[date_obj.strftime("%Y-%m-%d")] += 1
+                                emoji_count += 1
+                    except ValueError:
+                        continue
+
+            page += 1
+    
+    def save_statistics_as_excel(self, job_name):
+        # 날짜별 이모지 포함 글 개수를 데이터프레임으로 생성
+        data = {
+            "날짜": list(self.emoji_date_stats.keys()),
+            "이모지 포함 글 개수": list(self.emoji_date_stats.values())
+        }
+        df = pd.DataFrame(data)
+        
+        # 현재 날짜와 직업 이름을 포함한 파일명 생성
+        today_date = datetime.today().strftime("%Y%m%d")
+        file_name = f"{job_name}_이모지_통계_{today_date}.xlsx"
+        
+        # 엑셀 파일로 저장
+        with pd.ExcelWriter(file_name, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="통계")
+            worksheet = writer.sheets["통계"]
+            
+            # 차트 추가
+            chart = writer.book.add_chart({"type": "column"})
+            chart.add_series({
+                "name": "이모지 포함 글 개수",
+                "categories": "=통계!A2:A{}".format(len(self.emoji_date_stats) + 1),
+                "values": "=통계!B2:B{}".format(len(self.emoji_date_stats) + 1),
+            })
+            chart.set_title({"name": "날짜별 이모지 포함 글 개수 통계"})
+            chart.set_x_axis({"name": "날짜"})
+            chart.set_y_axis({"name": "이모지 포함 글 개수"})
+            
+            worksheet.insert_chart("D2", chart)
+        
+        self.textBrowser.append(f"엑셀 파일로 저장되었습니다: {file_name}")
 app = QApplication(sys.argv)
 window = MainWindow()
 window.show()
